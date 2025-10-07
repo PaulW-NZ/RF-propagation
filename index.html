@@ -1,0 +1,342 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Draw line → Elevation profile (Dark)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+
+  <!-- Leaflet (core) -->
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet Draw -->
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+  <!-- Turf (for sampling along a line) -->
+
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+
+  <!-- Chart.js for the elevation chart -->
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+  <style>
+    html,body { height:100%; margin:0; font-family:Arial, Helvetica, sans-serif; background:#0b0f13; color:#ddd; }
+    #map { position: absolute; top:64px; left:8px; right:8px; height:58%; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.6); overflow:hidden; }
+    header { position:fixed; left:8px; right:8px; top:8px; height:48px; display:flex; gap:12px; align-items:center; padding:8px 12px; background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius:8px; z-index:1000; box-shadow:0 4px 10px rgba(0,0,0,0.6); }
+    select, button { background:#0f1720; color:#eee; border:1px solid rgba(255,255,255,0.06); padding:6px 10px; border-radius:6px; }
+    .muted { color:#99a0ad; font-size:13px; }
+    #chartWrap { position:absolute; left:8px; right:8px; bottom:8px; height:34%; background:linear-gradient(180deg, rgba(0,0,0,0.35), rgba(0,0,0,0.45)); border-radius:8px; padding:10px; box-shadow:0 6px 18px rgba(0,0,0,0.6); }
+    #elevationChart { width:100%; height:100%; }
+    .legend { font-size:13px; margin-left:8px; color:#cbd5e1; }
+    .controls { display:flex; gap:8px; align-items:center; }
+    #status { margin-left:auto; color:#9aa6b2; font-size:13px; }
+    a.small { color:#9fc7ff; text-decoration:none; font-size:12px; }
+    footer.note { position:fixed; left:8px; bottom:8px; color:#7f8b96; font-size:12px; z-index:1200; }
+  </style>
+
+</head>
+<body>
+  <header>
+    <div style="font-weight:700">Leaflet — Draw a line → Elevation profile</div>
+
+```
+<div class="controls">
+  <label class="muted" for="service">Elevation service</label>
+  <select id="service" title="Choose elevation API">
+    <option value="opentopo">OpenTopoData (recommended)</option>
+    <option value="open-elevation">Open-Elevation</option>
+  </select>
+
+  <button id="clearBtn" title="Clear map & chart">Clear</button>
+  <button id="sampleSpacingBtn" title="Toggle sample spacing">Spacing: 50m</button>
+</div>
+
+<div id="status">Draw a polyline (draw toolbar on the left). Hover chart to see location.</div>
+```
+
+  </header>
+
+  <div id="map"></div>
+
+  <div id="chartWrap">
+    <canvas id="elevationChart"></canvas>
+  </div>
+
+  <footer class="note">Uses CartoDB Dark tiles · samples line with <a class="small" href="https://turfjs.org" target="_blank">turf.js</a> · Chart via Chart.js</footer>
+
+<script>
+/* ---------- Map setup (dark basemap) ---------- */
+const map = L.map('map', { zoomControl:true }).setView([37.75, -122.45], 12);
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; CartoDB, &copy; OpenStreetMap contributors',
+  maxZoom: 19
+}).addTo(map);
+
+/* ---------- Leaflet Draw ---------- */
+const drawnItems = new L.FeatureGroup().addTo(map);
+const drawControl = new L.Control.Draw({
+  edit: { featureGroup: drawnItems, remove: true },
+  draw: {
+    polygon: false,
+    circle: false,
+    marker: false,
+    rectangle: false,
+    circlemarker: false,
+    polyline: { metric: true, shapeOptions: { color: '#00e' } }
+  }
+});
+map.addControl(drawControl);
+
+/* ---------- UI elements ---------- */
+const serviceSelect = document.getElementById('service');
+const clearBtn = document.getElementById('clearBtn');
+const sampleSpacingBtn = document.getElementById('sampleSpacingBtn');
+const statusEl = document.getElementById('status');
+
+let sampleSpacing = 50; // meters (toggle with button)
+sampleSpacingBtn.addEventListener('click', () => {
+  sampleSpacing = sampleSpacing === 50 ? 20 : 50;
+  sampleSpacingBtn.textContent = `Spacing: ${sampleSpacing}m`;
+});
+
+/* ---------- Chart setup (Chart.js) ---------- */
+const ctx = document.getElementById('elevationChart').getContext('2d');
+let elevationChart = new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: [], // distances
+    datasets: [{
+      label: 'Elevation (m)',
+      data: [],
+      fill: true,
+      tension: 0.2,
+      pointRadius: 0,
+      borderWidth: 2
+    }]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    scales: {
+      x: { title: { display:true, text: 'Distance (m)' }, ticks: { color: '#cbd5e1' } },
+      y: { title: { display:true, text: 'Elevation (m)' }, ticks: { color: '#cbd5e1' } }
+    },
+    plugins: {
+      legend: { labels: { color: '#cbd5e1' } },
+      tooltip: {
+        callbacks: {
+          label: (ctx) => ` ${ctx.parsed.y.toFixed(1)} m`
+        }
+      }
+    },
+    interaction: { mode: 'index', intersect: false },
+    onHover: (evt, active) => {
+      if (active.length) {
+        const idx = active[0].index;
+        showMarkerAtIndex(idx);
+      } else {
+        clearHoverMarker();
+      }
+    }
+  }
+});
+
+/* Hover marker */
+let hoverMarker = null;
+function showMarkerAtIndex(i) {
+  if (!currentSamples || !currentSamples[i]) return;
+  const latlng = [ currentSamples[i].lat, currentSamples[i].lon ];
+  if (!hoverMarker) {
+    hoverMarker = L.circleMarker(latlng, { radius:6, color:'#ff7f50', fillColor:'#ff7f50', fillOpacity:1 }).addTo(map);
+  } else {
+    hoverMarker.setLatLng(latlng);
+  }
+}
+function clearHoverMarker() { if (hoverMarker) map.removeLayer(hoverMarker); hoverMarker = null; }
+
+/* ---------- Helpers: sample line & call APIs ---------- */
+let currentSamples = null;
+let lastPolyline = null;
+
+// Returns an array of {lat, lon, dist} sampled along the polyline every `spacing` meters
+function sampleLineLatLngs(latlngs, spacing) {
+  // build Turf.js LineString
+  const coords = latlngs.map(ll => [ll.lng, ll.lat]);
+  const line = turf.lineString(coords);
+  const length = turf.length(line, {units:'kilometers'}) * 1000; // meters
+  if (length === 0) return [];
+  const samples = [];
+  const pts = Math.max(2, Math.ceil(length / spacing));
+  for (let i=0;i<=pts;i++) {
+    const distKm = (i * spacing) / 1000;
+    // turf.along takes distance in kilometers
+    const pt = turf.along(line, distKm, {units:'kilometers'});
+    const [lng, lat] = pt.geometry.coordinates;
+    samples.push({ lat: lat, lon: lng, dist: i*spacing });
+  }
+  // adjust final distances to actual distances (last point)
+  // recompute exact distances if needed (fine enough for chart)
+  return samples;
+}
+
+// Call selected elevation service with an array of {lat,lon}
+// returns Promise resolving to array of elevations in meters (same order)
+async function fetchElevations(samples, serviceKey) {
+  if (!samples.length) return [];
+  // Build "lat,lon|lat,lon|..." string but both services expect lat,lon; check limit
+  // We'll batch requests if necessary (some services restrict length); keep batches ~150 points
+  const batchSize = 120;
+  let elevations = [];
+
+  for (let i=0;i<samples.length;i+=batchSize) {
+    const batch = samples.slice(i, i+batchSize);
+    if (serviceKey === 'opentopo') {
+      // Use OpenTopoData. dataset 'srtm90m' is widely available; can be changed.
+      const dataset = 'srtm90m';
+      const locations = batch.map(p => `${p.lat},${p.lon}`).join('|');
+      //const proxy = "https://api.allorigins.win/raw?url=";
+      //const url = proxy + encodeURIComponent(`https://api.opentopodata.org/v1/srtm90m?locations=${locations}`);
+
+      const url = `https://api.opentopodata.org/v1/${dataset}?locations=${locations}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`OpenTopoData error ${res.status}`);
+      const j = await res.json();
+      // j.results is an array with elevation (or null)
+      const batchElevs = (j.results || []).map(r => r.elevation === null ? NaN : Number(r.elevation));
+      elevations = elevations.concat(batchElevs);
+    } else if (serviceKey === 'open-elevation') {
+      // Open-Elevation expects JSON with locations array OR locations param? We'll use their endpoint with locations=lat,lon|...
+      const locations = batch.map(p => `${p.lat},${p.lon}`).join('|');
+      //const url = proxy + encodeURIComponent(`https://api.open-elevation.com/api/v1/lookup?locations=${locations}`);
+
+      const url = `https://api.open-elevation.com/api/v1/lookup?locations=${locations}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Open-Elevation error ${res.status}`);
+      const j = await res.json();
+      // j.results: [{latitude, longitude, elevation}, ...]
+      const batchElevs = (j.results || []).map(r => r.elevation === null ? NaN : Number(r.elevation));
+      elevations = elevations.concat(batchElevs);
+    } else {
+      throw new Error('Unknown service');
+    }
+    // gentle pause to be polite (very small)
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return elevations;
+}
+
+/* ---------- Draw handling ---------- */
+map.on(L.Draw.Event.CREATED, async function (event) {
+  // clear previous
+  drawnItems.clearLayers();
+  clearHoverMarker();
+  currentSamples = null;
+  elevationChart.data.labels = [];
+  elevationChart.data.datasets[0].data = [];
+  elevationChart.update();
+
+  const layer = event.layer;
+  drawnItems.addLayer(layer);
+  lastPolyline = layer;
+
+  // get latlngs of polyline (flatten)
+  const latlngs = [];
+  if (layer instanceof L.Polyline) {
+    layer.getLatLngs().forEach(p => {
+      if (Array.isArray(p)) p.forEach(s => latlngs.push(s));
+      else latlngs.push(p);
+    });
+  } else {
+    statusEl.textContent = 'Please draw a polyline.';
+    return;
+  }
+
+  statusEl.textContent = 'Sampling line...';
+  // sample points every `sampleSpacing` meters
+  const samples = sampleLineLatLngs(latlngs, sampleSpacing);
+
+  if (!samples.length) { statusEl.textContent = 'Line too short to sample.'; return; }
+
+  statusEl.textContent = `Fetching elevations from ${serviceSelect.options[serviceSelect.selectedIndex].text}...`;
+  try {
+    const elevs = await fetchElevations(samples, serviceSelect.value);
+    // attach elevations to samples
+    for (let i=0;i<samples.length;i++) {
+      samples[i].elevation = (elevs[i] === undefined || Number.isNaN(elevs[i])) ? null : elevs[i];
+    }
+    // compute cumulative distances (better than fixed spacing for final point)
+    let accum = 0;
+    const distances = [0];
+    for (let i=1;i<samples.length;i++) {
+      const p0 = [samples[i-1].lon, samples[i-1].lat];
+      const p1 = [samples[i].lon, samples[i].lat];
+      const seg = turf.distance(turf.point(p0), turf.point(p1), {units:'meters'});
+      accum += seg;
+      distances.push(accum);
+    }
+
+    // update chart with distances & elevations
+    const cleanElevs = samples.map((s, idx) => s.elevation === null ? NaN : s.elevation);
+    elevationChart.data.labels = distances.map(d => d.toFixed(1));
+    elevationChart.data.datasets[0].data = cleanElevs;
+    elevationChart.update();
+
+    currentSamples = samples.map((s, idx) => ({ lat: s.lat, lon: s.lon, elevation: s.elevation, dist: distances[idx] }));
+
+    statusEl.textContent = `Profile ready — ${samples.length} samples, total ≈ ${Math.round(accum)} m. Hover the chart to see location.`;
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Error fetching elevations: ' + (err.message || err);
+  }
+});
+
+/* Keep marker in sync with chart hover - use map click on chart to jump map */
+document.getElementById('elevationChart').addEventListener('click', function (evt) {
+  if (!currentSamples || !currentSamples.length) return;
+  const points = elevationChart.getElementsAtEventForMode(evt, 'nearest', { intersect: true }, false);
+  if (!points.length) return;
+  const idx = points[0].index;
+  const s = currentSamples[idx];
+  if (s) {
+    map.setView([s.lat, s.lon], Math.max(map.getZoom(), 13));
+  }
+});
+
+/* Clear button */
+clearBtn.addEventListener('click', () => {
+  drawnItems.clearLayers();
+  elevationChart.data.labels = [];
+  elevationChart.data.datasets[0].data = [];
+  elevationChart.update();
+  currentSamples = null;
+  statusEl.textContent = 'Cleared.';
+  clearHoverMarker();
+});
+
+/* When user edits / deletes polylines via edit toolbar, clear chart */
+map.on('draw:edited draw:deleted', function () {
+  elevationChart.data.labels = [];
+  elevationChart.data.datasets[0].data = [];
+  elevationChart.update();
+  currentSamples = null;
+  statusEl.textContent = 'Draw or edit a polyline.';
+  clearHoverMarker();
+});
+
+/* Friendly note if APIs are rate-limited / CORS fails */
+window.addEventListener('error', (e) => {
+  // don't spam — only show visible network failures
+  if (e && e.message && e.message.toLowerCase().includes('failed to fetch')) {
+    console.warn('Network/CORS error detected. API may be down or blocked by CORS.');
+  }
+});
+</script>
+
+</body>
+</html>
