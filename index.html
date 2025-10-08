@@ -337,6 +337,7 @@
                     <li>The elevation profile will be displayed in the chart below the map.</li>
                     <li>You can adjust the antenna heights for the start and end points to see how it affects the line of sight.</li>
                     <li>Use the options in the sidebar to configure the units, map style, and other settings.</li>
+                    <li>The "Earth Curvature" option applies the 4/3 Earth radius model to account for standard atmospheric refraction.</li>
                 </ul>
                 <button id="close-help" class="btn-primary">Close</button>
             </div>
@@ -585,10 +586,11 @@
                 const elevationValues = this.elevationData.map((d, i) => {
                     let elevation = d.elevation;
                     if (applyCurvature) {
-                        const R = 6371e3; // Earth radius in meters
+                        const R = 6371e3 * 4/3; // 4/3 Earth radius in meters
                         const h = distances[i];
-                        const correction = (h * h) / (2 * R);
-                        elevation -= correction;
+                        const total_h = distances[distances.length-1];
+                        const correction = (h * (total_h-h)) / (2 * R);
+                        elevation += correction;
                     }
                     if (units === 'imperial') {
                         return elevation * 3.28084 * exaggeration;
