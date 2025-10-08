@@ -16,7 +16,7 @@ A web-based tool for visualizing RF propagation paths and elevation profiles.
 ## Demo
 ![RF-propagation](./gui.jpg)
 
-Use it live at `rfp.wavevector.co.nz`.
+Use it live at [rfp.wavevector.co.nz](rfp.wavevector.co.nz)
 
 ## Usage
 
